@@ -1,0 +1,53 @@
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+venv/
+.venv/
+env/
+.python-version.local
+
+# Local databases and logs
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.log
+
+# Node.js dependencies and generated frontend builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+
+# Tool caches
+.vite/
+**/.vite/
+.cache/
+**/.cache/
+
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+*.swp
+*.swo
