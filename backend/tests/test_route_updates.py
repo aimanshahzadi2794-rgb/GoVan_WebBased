@@ -89,3 +89,12 @@ def test_non_admin_cannot_edit_route(client):
         headers=passenger,
     )
     assert response.status_code == 403
+
+
+def test_route_rejects_out_of_range_stop_coordinates(client):
+    admin = register_and_login(client, "route-coordinate-admin@example.com", role="admin")
+    response = client.post("/routes/", json={
+        "name": "Invalid coordinates",
+        "stops": [{"name": "Bad stop", "lat": 91, "lng": 74.3}],
+    }, headers=admin)
+    assert response.status_code == 422

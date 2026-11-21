@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api } from "../api";
 
 export default function Login({ onLoggedIn }) {
@@ -6,7 +6,11 @@ export default function Login({ onLoggedIn }) {
     () => new URLSearchParams(window.location.search).get("reset_token") || "",
   );
   const [mode, setMode] = useState(() => (
-    new URLSearchParams(window.location.search).has("reset_token") ? "reset" : "login"
+    new URLSearchParams(window.location.search).has("reset_token")
+      ? "reset"
+      : new URLSearchParams(window.location.search).get("mode") === "register"
+        ? "register"
+        : "login"
   ));
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -16,6 +20,14 @@ export default function Login({ onLoggedIn }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has("mode")) {
+      url.searchParams.delete("mode");
+      window.history.replaceState({}, "", url);
+    }
+  }, []);
 
   async function submit(e) {
     e.preventDefault();
@@ -90,23 +102,6 @@ export default function Login({ onLoggedIn }) {
           {mode === "forgot" && "We will generate a password reset link if your account exists"}
           {mode === "reset" && "Choose a new password for your account"}
         </p>
-
-        {mode !== "reset" && (
-          <div className="tabs">
-            <div
-              className={`tab ${mode === "login" || mode === "forgot" ? "active" : ""}`}
-              onClick={() => { setError(""); setNotice(""); setMode("login"); }}
-            >
-              Log in
-            </div>
-            <div
-              className={`tab ${mode === "register" ? "active" : ""}`}
-              onClick={() => { setError(""); setNotice(""); setMode("register"); }}
-            >
-              Register
-            </div>
-          </div>
-        )}
 
         <form onSubmit={submit}>
           {mode === "register" && (
@@ -191,6 +186,22 @@ export default function Login({ onLoggedIn }) {
           >
             Back to log in
           </button>
+        )}
+        {mode === "login" && (
+          <p className="auth-switch">
+            Don&apos;t have an account?{" "}
+            <button type="button" onClick={() => { setError(""); setNotice(""); setMode("register"); }}>
+              Sign up
+            </button>
+          </p>
+        )}
+        {mode === "register" && (
+          <p className="auth-switch">
+            Already have an account?{" "}
+            <button type="button" onClick={() => { setError(""); setNotice(""); setMode("login"); }}>
+              Sign in
+            </button>
+          </p>
         )}
         <p className="hint-text">Fleet admin? Use the TravelEase Admin Portal on desktop instead.</p>
       </div>

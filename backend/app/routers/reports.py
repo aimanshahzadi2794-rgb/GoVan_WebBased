@@ -2,12 +2,12 @@ from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role
+from ..deps import ensure_organization_access, is_platform_admin, require_organization_manager
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 DELAY_THRESHOLD_MINUTES = 5
@@ -40,7 +40,7 @@ def report_summary(
     organization_id: Optional[int] = None,
     unassigned_organization: bool = False,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     """Summarize trips, bookings, and SOS alerts for the selected date range.
 
@@ -50,6 +50,14 @@ def report_summary(
     """
     if from_date and to_date and from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be on or before to")
+    if not is_platform_admin(admin):
+        if admin.organization_id is None:
+            raise HTTPException(status_code=403, detail="An organization must be assigned to this account")
+        if organization_id is not None:
+            ensure_organization_access(admin, organization_id)
+        if unassigned_organization:
+            raise HTTPException(status_code=404, detail="Report not found")
+        organization_id = admin.organization_id
 
     report_date = func.coalesce(
         models.Trip.started_at,
@@ -197,6 +205,20 @@ def report_summary(
         history_by_trip_id[trip.id]["passengers_booked"] = booking_counts.get(trip.route_id, 0)
 
     alert_query = db.query(models.EmergencyAlert)
+    if not is_platform_admin(admin):
+        if admin.organization_id is None:
+            alert_query = alert_query.filter(models.EmergencyAlert.id == -1)
+        else:
+            alert_query = alert_query.outerjoin(
+                models.Trip, models.EmergencyAlert.trip_id == models.Trip.id
+            ).outerjoin(
+                models.Route, models.Trip.route_id == models.Route.id
+            ).join(
+                models.User, models.EmergencyAlert.raised_by_id == models.User.id
+            ).filter(or_(
+                models.Route.organization_id == admin.organization_id,
+                models.User.organization_id == admin.organization_id,
+            ))
     if from_date:
         alert_query = alert_query.filter(
             models.EmergencyAlert.created_at >= datetime.combine(from_date, time.min)

@@ -33,6 +33,14 @@ def ensure_sqlite_schema():
         return
 
     with engine.begin() as conn:
+        organization_columns = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(organizations)").fetchall()
+        }
+        if "is_active" not in organization_columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE organizations ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1"
+            )
+
         user_columns = {
             row[1] for row in conn.exec_driver_sql("PRAGMA table_info(users)").fetchall()
         }

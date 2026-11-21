@@ -1,10 +1,17 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role, get_current_user
+from ..deps import (
+    ensure_organization_access,
+    is_platform_admin,
+    require_organization_manager,
+    require_role,
+    get_current_user,
+)
 from ..notification_service import (
     notify_passenger_and_guardians,
     notify_trip_audience,
@@ -15,8 +22,19 @@ router = APIRouter(prefix="/alerts", tags=["alerts"])
 
 
 @router.get("/", response_model=List[schemas.AlertOut])
-def list_alerts(db: Session = Depends(get_db), admin: models.User = Depends(require_role("admin"))):
-    return db.query(models.EmergencyAlert).order_by(models.EmergencyAlert.id.desc()).all()
+def list_alerts(db: Session = Depends(get_db), admin: models.User = Depends(require_organization_manager())):
+    query = db.query(models.EmergencyAlert)
+    if not is_platform_admin(admin):
+        if admin.organization_id is None:
+            return []
+        query = query.outerjoin(models.Trip, models.EmergencyAlert.trip_id == models.Trip.id)
+        query = query.outerjoin(models.Route, models.Trip.route_id == models.Route.id)
+        query = query.join(models.User, models.EmergencyAlert.raised_by_id == models.User.id)
+        query = query.filter(or_(
+            models.User.organization_id == admin.organization_id,
+            models.Route.organization_id == admin.organization_id,
+        ))
+    return query.order_by(models.EmergencyAlert.id.desc()).all()
 
 
 @router.get("/mine", response_model=List[schemas.AlertOut])
@@ -40,6 +58,8 @@ def raise_alert(
         trip = db.get(models.Trip, payload.trip_id)
         if not trip or trip.status != "active":
             raise HTTPException(status_code=400, detail="SOS trip must be active")
+        if user.organization_id != trip.route.organization_id:
+            raise HTTPException(status_code=404, detail="Trip not found")
         if user.role == models.UserRole.driver and trip.driver_id != user.id:
             raise HTTPException(status_code=403, detail="You can only raise an SOS for your own trip")
         if user.role == models.UserRole.passenger:
@@ -77,11 +97,21 @@ def raise_alert(
             trip_id=trip.id if trip else None,
             alert_id=alert.id,
         )
+    alert_organization_id = trip.route.organization_id if trip else user.organization_id
     admin_ids = {
         admin_id
         for (admin_id,) in db.query(models.User.id).filter(
-            models.User.role == models.UserRole.admin,
+            models.User.role.in_([
+                models.UserRole.admin,
+                models.UserRole.super_admin,
+                models.UserRole.organization_admin,
+                models.UserRole.fleet_manager,
+            ]),
             models.User.is_active.is_(True),
+            or_(
+                models.User.role.in_([models.UserRole.admin, models.UserRole.super_admin]),
+                models.User.organization_id == alert_organization_id,
+            ),
         ).all()
     }
     notify_users(
@@ -102,11 +132,16 @@ def raise_alert(
 def resolve_alert(
     alert_id: int,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     alert = db.get(models.EmergencyAlert, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+    alert_organization_id = (
+        alert.trip.route.organization_id if alert.trip is not None
+        else alert.raised_by.organization_id
+    )
+    ensure_organization_access(admin, alert_organization_id)
     alert.status = "resolved"
     db.commit()
     db.refresh(alert)

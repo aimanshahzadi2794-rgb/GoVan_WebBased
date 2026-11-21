@@ -6,8 +6,15 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role, get_current_user
-from ..geo import route_distance_km, estimate_duration_minutes
+from ..deps import (
+    ensure_organization_access,
+    is_platform_admin,
+    log_activity,
+    require_organization_manager,
+    scope_organization_query,
+    get_current_user,
+)
+from ..routing import route_metrics
 
 
 router = APIRouter(prefix="/routes", tags=["routes"])
@@ -21,13 +28,16 @@ def _ensure_organization_exists(db: Session, organization_id: int | None):
 def _enrich(route: models.Route, confirmed_bookings: int = 0) -> models.Route:
     """
     Calculate and attach route distance and estimated duration.
-    Distance is calculated using the Haversine formula
-    between consecutive stops.
+    Use road-network metrics from a configured OSRM-compatible service,
+    falling back to Haversine distance with an explicit source label.
     """
-    distance = route_distance_km(route.stops)
-
-    route.distance_km = round(distance, 2)
-    route.estimated_duration_min = estimate_duration_minutes(distance)
+    distance, duration, geometry, source, routing_duration, traffic_scenario = route_metrics(route.stops)
+    route.distance_km = distance
+    route.estimated_duration_min = duration
+    route.geometry = geometry
+    route.routing_source = source
+    route.routing_duration_min = routing_duration
+    route.traffic_scenario = traffic_scenario
     route.vehicle_capacity = route.vehicle.capacity if route.vehicle else None
     route.confirmed_bookings = confirmed_bookings
     route.seats_left = (
@@ -44,7 +54,7 @@ def list_routes(
     db: Session = Depends(get_db),
     user: models.User = Depends(get_current_user),
 ):
-    routes = db.query(models.Route).all()
+    routes = scope_organization_query(db.query(models.Route), models.Route, user).all()
     confirmed_counts = dict(
         db.query(models.Booking.route_id, func.count(models.Booking.id))
         .filter(models.Booking.status == "confirmed")
@@ -61,9 +71,22 @@ def list_routes(
 def create_route(
     payload: schemas.RouteCreate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
-    _ensure_organization_exists(db, payload.organization_id)
+    organization_id = payload.organization_id
+    if not is_platform_admin(admin):
+        if admin.organization_id is None:
+            raise HTTPException(status_code=403, detail="An organization must be assigned to this account")
+        if organization_id is None:
+            organization_id = admin.organization_id
+    _ensure_organization_exists(db, organization_id)
+    ensure_organization_access(admin, organization_id)
+    if payload.vehicle_id is not None:
+        vehicle = db.get(models.Vehicle, payload.vehicle_id)
+        if not vehicle:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+        if vehicle.organization_id != organization_id:
+            raise HTTPException(status_code=400, detail="Route and vehicle must belong to the same organization")
     route = models.Route(
         name=payload.name,
         pickup_time=payload.pickup_time,
@@ -72,7 +95,7 @@ def create_route(
         days_of_week=payload.days_of_week,
         valid_from=payload.valid_from,
         valid_to=payload.valid_to,
-        organization_id=payload.organization_id,
+        organization_id=organization_id,
     )
     db.add(route)
     db.flush()  # assigns route.id without committing yet
@@ -82,6 +105,11 @@ def create_route(
 
     db.commit()
     db.refresh(route)
+    log_activity(
+        db, admin, "route.created", "route", route.id,
+        organization_id=route.organization_id, details={"name": route.name},
+    )
+    db.commit()
 
     return _enrich(route)
 
@@ -100,22 +128,32 @@ def update_route(
     route_id: int,
     payload: schemas.RouteUpdate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     route = db.get(models.Route, route_id)
     if not route:
         raise HTTPException(status_code=404, detail="Route not found")
+    ensure_organization_access(admin, route.organization_id)
     _ensure_route_editable(db, route)
 
     updates = payload.model_dump(exclude_unset=True)
     if "organization_id" in updates:
         _ensure_organization_exists(db, updates["organization_id"])
+        ensure_organization_access(admin, updates["organization_id"])
     valid_from = updates.get("valid_from", route.valid_from)
     valid_to = updates.get("valid_to", route.valid_to)
     if valid_from and valid_to and valid_from > valid_to:
         raise HTTPException(status_code=400, detail="valid_from must be on or before valid_to")
 
     stop_payloads = updates.pop("stops", None)
+    effective_organization_id = updates.get("organization_id", route.organization_id)
+    effective_vehicle_id = updates.get("vehicle_id", route.vehicle_id)
+    if effective_vehicle_id is not None:
+        vehicle = db.get(models.Vehicle, effective_vehicle_id)
+        if not vehicle:
+            raise HTTPException(status_code=404, detail="Vehicle not found")
+        if vehicle.organization_id != effective_organization_id:
+            raise HTTPException(status_code=400, detail="Route and vehicle must belong to the same organization")
     for field, value in updates.items():
         setattr(route, field, value)
 
@@ -127,6 +165,12 @@ def update_route(
 
     db.commit()
     db.refresh(route)
+    log_activity(
+        db, admin, "route.updated", "route", route.id,
+        organization_id=route.organization_id,
+        details={"changed_fields": sorted(updates)},
+    )
+    db.commit()
     return _enrich(route)
 
 
@@ -134,7 +178,7 @@ def update_route(
 def delete_route(
     route_id: int,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     route = db.get(models.Route, route_id)
 
@@ -143,8 +187,13 @@ def delete_route(
             status_code=404,
             detail="Route not found",
         )
+    ensure_organization_access(admin, route.organization_id)
 
     _ensure_route_editable(db, route)
+    log_activity(
+        db, admin, "route.deleted", "route", route.id,
+        organization_id=route.organization_id, details={"name": route.name},
+    )
     db.delete(route)
     db.commit()
 

@@ -10,15 +10,17 @@ from .models import OrganizationType, UserRole
 class UserCreate(BaseModel):
     name: str
     email: EmailStr
-    password: str
-    role: Literal["admin", "passenger", "driver", "guardian"] = "passenger"
+    password: str = Field(min_length=8)
+    # Manager roles are created by an authenticated administrator, never through
+    # the public registration form.
+    role: Literal["admin", "super_admin", "passenger", "driver", "guardian"] = "passenger"
     organization_id: Optional[int] = None
 
 
 class AdminUserCreate(BaseModel):
     name: str
     email: EmailStr
-    password: str
+    password: str = Field(min_length=8)
     role: UserRole
     organization_id: Optional[int] = None
 
@@ -106,6 +108,7 @@ class OrganizationUpdate(BaseModel):
     name: Optional[str] = None
     type: Optional[OrganizationType] = None
     contact_email: Optional[EmailStr] = None
+    is_active: Optional[bool] = None
 
 
 class OrganizationOut(BaseModel):
@@ -113,6 +116,20 @@ class OrganizationOut(BaseModel):
     name: str
     type: OrganizationType
     contact_email: Optional[EmailStr]
+    is_active: bool
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ActivityLogOut(BaseModel):
+    id: int
+    actor_id: Optional[int]
+    organization_id: Optional[int]
+    action: str
+    entity_type: str
+    entity_id: Optional[int]
+    details: dict
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -193,8 +210,8 @@ class DriverAssign(BaseModel):
 
 class StopCreate(BaseModel):
     name: str
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
     sequence: int = 0
 
 
@@ -265,6 +282,10 @@ class RouteOut(BaseModel):
     seats_left: Optional[int] = None
     distance_km: Optional[float] = None
     estimated_duration_min: Optional[int] = None
+    geometry: List[List[float]] = Field(default_factory=list)
+    routing_source: str = "straight_line"
+    routing_duration_min: Optional[int] = None
+    traffic_scenario: Optional[str] = None
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -276,8 +297,8 @@ class TripCreate(BaseModel):
 
 
 class LocationUpdate(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
     accuracy: Optional[float] = None     
 
 

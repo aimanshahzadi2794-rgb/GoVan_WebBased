@@ -4,7 +4,14 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role, get_current_user
+from ..deps import (
+    ensure_organization_access,
+    is_platform_admin,
+    log_activity,
+    require_organization_manager,
+    scope_organization_query,
+    get_current_user,
+)
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
 
@@ -44,13 +51,13 @@ def _enrich_vehicle(db: Session, vehicle: models.Vehicle) -> models.Vehicle:
 
 @router.get("/", response_model=List[schemas.VehicleOut])
 def list_vehicles(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
-    vehicles = db.query(models.Vehicle).all()
+    vehicles = scope_organization_query(db.query(models.Vehicle), models.Vehicle, user).all()
     return [_enrich_vehicle(db, v) for v in vehicles]
 
 
 @router.get("/summary", response_model=schemas.FleetSummary)
-def fleet_summary(db: Session = Depends(get_db), admin: models.User = Depends(require_role("admin"))):
-    vehicles = db.query(models.Vehicle).all()
+def fleet_summary(db: Session = Depends(get_db), admin: models.User = Depends(require_organization_manager())):
+    vehicles = scope_organization_query(db.query(models.Vehicle), models.Vehicle, admin).all()
     enriched = [_enrich_vehicle(db, v) for v in vehicles]
 
     on_route = sum(1 for v in enriched if v.on_route)
@@ -94,9 +101,16 @@ def fleet_summary(db: Session = Depends(get_db), admin: models.User = Depends(re
 def create_vehicle(
     payload: schemas.VehicleCreate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
-    _ensure_organization_exists(db, payload.organization_id)
+    organization_id = payload.organization_id
+    if not is_platform_admin(admin):
+        if admin.organization_id is None:
+            raise HTTPException(status_code=403, detail="An organization must be assigned to this account")
+        if organization_id is None:
+            organization_id = admin.organization_id
+    _ensure_organization_exists(db, organization_id)
+    ensure_organization_access(admin, organization_id)
     fuel_type = payload.fuel_type.strip().lower()
     ownership_type = payload.ownership_type.strip().lower()
     if fuel_type == "cng":
@@ -108,6 +122,7 @@ def create_vehicle(
     if existing:
         raise HTTPException(status_code=400, detail="Plate number already registered")
     data = payload.model_dump()
+    data["organization_id"] = organization_id
     data["fuel_type"] = fuel_type
     data["ownership_type"] = ownership_type
     data["vehicle_type"] = data["vehicle_type"].strip().lower() or "van"
@@ -115,6 +130,12 @@ def create_vehicle(
     db.add(vehicle)
     db.commit()
     db.refresh(vehicle)
+    log_activity(
+        db, admin, "vehicle.created", "vehicle", vehicle.id,
+        organization_id=vehicle.organization_id,
+        details={"plate_number": vehicle.plate_number},
+    )
+    db.commit()
     return vehicle
 
 
@@ -123,11 +144,12 @@ def set_vehicle_status(
     vehicle_id: int,
     payload: dict,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     vehicle = db.get(models.Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
+    ensure_organization_access(admin, vehicle.organization_id)
     status = payload.get("status")
     if status not in {"active", "idle", "maintenance", "offline"}:
         raise HTTPException(status_code=400, detail="Invalid status")
@@ -136,6 +158,11 @@ def set_vehicle_status(
     vehicle.status = status
     db.commit()
     db.refresh(vehicle)
+    log_activity(
+        db, admin, "vehicle.status_updated", "vehicle", vehicle.id,
+        organization_id=vehicle.organization_id, details={"status": status},
+    )
+    db.commit()
     return _enrich_vehicle(db, vehicle)
 
 
@@ -144,15 +171,17 @@ def update_vehicle(
     vehicle_id: int,
     payload: schemas.VehicleUpdate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     vehicle = db.get(models.Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
+    ensure_organization_access(admin, vehicle.organization_id)
 
     updates = payload.model_dump(exclude_unset=True)
     if "organization_id" in updates:
         _ensure_organization_exists(db, updates["organization_id"])
+        ensure_organization_access(admin, updates["organization_id"])
     plate_number = updates.get("plate_number")
     if plate_number is not None:
         plate_number = plate_number.strip()
@@ -175,4 +204,10 @@ def update_vehicle(
         setattr(vehicle, field, value)
     db.commit()
     db.refresh(vehicle)
+    log_activity(
+        db, admin, "vehicle.updated", "vehicle", vehicle.id,
+        organization_id=vehicle.organization_id,
+        details={"changed_fields": sorted(updates)},
+    )
+    db.commit()
     return _enrich_vehicle(db, vehicle)

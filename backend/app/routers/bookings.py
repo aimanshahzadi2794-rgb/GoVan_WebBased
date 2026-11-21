@@ -4,7 +4,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role, get_current_user
+from ..deps import (
+    require_role,
+    get_current_user,
+)
 
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 
@@ -13,8 +16,17 @@ router = APIRouter(prefix="/bookings", tags=["bookings"])
 def list_bookings(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
     q = db.query(models.Booking)
     if user.role == models.UserRole.passenger:
-        q = q.filter(models.Booking.passenger_id == user.id)
-    elif user.role != models.UserRole.admin:
+        q = q.join(models.Route).filter(
+            models.Booking.passenger_id == user.id,
+            models.Route.organization_id == user.organization_id,
+        )
+    elif user.role in {models.UserRole.admin, models.UserRole.super_admin}:
+        pass
+    elif user.role in {models.UserRole.organization_admin, models.UserRole.fleet_manager}:
+        if user.organization_id is None:
+            return []
+        q = q.join(models.Route).filter(models.Route.organization_id == user.organization_id)
+    else:
         raise HTTPException(status_code=403, detail="Role is not permitted to view bookings")
     bookings = q.options(
         joinedload(models.Booking.route),
@@ -48,6 +60,12 @@ def create_booking(
     route = db.get(models.Route, payload.route_id)
     if not route:
         raise HTTPException(status_code=404, detail="Route not found")
+    if route.organization_id != passenger.organization_id:
+        raise HTTPException(status_code=404, detail="Route not found")
+    if route.organization_id is not None:
+        organization = db.get(models.Organization, route.organization_id)
+        if organization is None or not organization.is_active:
+            raise HTTPException(status_code=404, detail="Route not found")
     if payload.boarding_stop_id is not None:
         boarding_stop = db.get(models.Stop, payload.boarding_stop_id)
         if not boarding_stop or boarding_stop.route_id != route.id:

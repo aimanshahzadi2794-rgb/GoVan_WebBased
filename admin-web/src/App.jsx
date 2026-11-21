@@ -17,7 +17,7 @@ export default function App() {
     return <Login onLoggedIn={setUser} />;
   }
 
-  if (user.role !== "admin") {
+  if (!["admin", "super_admin", "organization_admin", "fleet_manager"].includes(user.role)) {
     return (
       <div className="centered-screen">
         <div className="login-card" style={{ textAlign: "center" }}>

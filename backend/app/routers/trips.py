@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_
@@ -6,8 +7,15 @@ from sqlalchemy.orm import Session, joinedload
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role, get_current_user
-from ..geo import estimate_duration_minutes, haversine_distance_km
+from ..deps import (
+    ensure_organization_access,
+    log_activity,
+    require_organization_manager,
+    require_role,
+    get_current_user,
+)
+from ..geo import haversine_distance_km
+from ..routing import route_metrics
 from ..notification_service import (
     notify_if_trip_delayed,
     notify_passenger_and_guardians,
@@ -30,11 +38,18 @@ def list_trips(db: Session = Depends(get_db), user: models.User = Depends(get_cu
             models.Booking.passenger_id == user.id,
             models.Booking.status == "confirmed",
         )
-        q = q.filter(
+        q = q.join(models.Route).filter(
             models.Trip.status == "active",
             models.Trip.route_id.in_(booked_route_ids),
+            models.Route.organization_id == user.organization_id,
         )
-    elif user.role != models.UserRole.admin:
+    elif user.role in {models.UserRole.admin, models.UserRole.super_admin}:
+        pass
+    elif user.role in {models.UserRole.organization_admin, models.UserRole.fleet_manager}:
+        if user.organization_id is None:
+            return []
+        q = q.join(models.Route).filter(models.Route.organization_id == user.organization_id)
+    else:
         raise HTTPException(status_code=403, detail="Role is not permitted to view trips")
     return q.order_by(models.Trip.id.desc()).all()
 
@@ -55,8 +70,11 @@ def active_trips_for_passenger(
     else:
         linked_ids = {
             passenger_id_value
-            for (passenger_id_value,) in db.query(models.GuardianLink.passenger_id).filter(
-                models.GuardianLink.guardian_id == user.id
+            for (passenger_id_value,) in db.query(models.GuardianLink.passenger_id)
+            .join(models.User, models.User.id == models.GuardianLink.passenger_id)
+            .filter(
+                models.GuardianLink.guardian_id == user.id,
+                models.User.organization_id == user.organization_id,
             ).all()
         }
         if passenger_id is not None:
@@ -85,6 +103,7 @@ def active_trips_for_passenger(
         )
         .filter(
             models.Trip.status == "active",
+            models.Route.organization_id == user.organization_id,
             models.Booking.status == "confirmed",
             models.Booking.passenger_id.in_(passenger_ids),
             models.Booking.passenger.has(
@@ -144,13 +163,10 @@ def active_trips_for_passenger(
             and trip.last_lat is not None
             and trip.last_lng is not None
         ):
-            distance_km = haversine_distance_km(
-                trip.last_lat,
-                trip.last_lng,
-                boarding_stop.lat,
-                boarding_stop.lng,
-            )
-            eta_minutes = estimate_duration_minutes(distance_km)
+            _, eta_minutes, _, _, _, _ = route_metrics([
+                SimpleNamespace(lat=trip.last_lat, lng=trip.last_lng),
+                boarding_stop,
+            ])
 
         result.append({
             "id": trip.id,
@@ -178,13 +194,16 @@ def active_trips_for_passenger(
 def create_trip(
     payload: schemas.TripCreate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     route = db.get(models.Route, payload.route_id)
     driver = db.query(models.User).filter(
         models.User.id == payload.driver_id, models.User.role == models.UserRole.driver
     ).first()
     if not route or not driver:
+        raise HTTPException(status_code=404, detail="Route or driver not found")
+    ensure_organization_access(admin, route.organization_id)
+    if driver.organization_id != route.organization_id:
         raise HTTPException(status_code=404, detail="Route or driver not found")
     if route.vehicle and route.vehicle.status != "active":
         raise HTTPException(status_code=400, detail="Route vehicle is not active")
@@ -194,6 +213,12 @@ def create_trip(
     db.add(trip)
     db.commit()
     db.refresh(trip)
+    log_activity(
+        db, admin, "trip.scheduled", "trip", trip.id,
+        organization_id=route.organization_id,
+        details={"route_id": route.id, "driver_id": driver.id},
+    )
+    db.commit()
     return trip
 
 
@@ -227,6 +252,12 @@ def start_trip(
     notify_if_trip_delayed(db, trip, started_at)
     db.commit()
     db.refresh(trip)
+    log_activity(
+        db, driver, "trip.started", "trip", trip.id,
+        organization_id=trip.route.organization_id,
+        details={"route_id": trip.route_id},
+    )
+    db.commit()
     return trip
 
 
@@ -307,11 +338,12 @@ def update_location(
 def get_trip_path(
     trip_id: int,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_organization_manager()),
 ):
     trip = db.get(models.Trip, trip_id)
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
+    ensure_organization_access(admin, trip.route.organization_id)
 
     return db.query(models.TripLocation).filter(
         models.TripLocation.trip_id == trip.id
@@ -327,7 +359,11 @@ def get_trip_stops(
     trip = db.get(models.Trip, trip_id)
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
-    if user.role != models.UserRole.admin:
+    if user.role in {models.UserRole.admin, models.UserRole.super_admin}:
+        pass
+    elif user.role in {models.UserRole.organization_admin, models.UserRole.fleet_manager}:
+        ensure_organization_access(user, trip.route.organization_id)
+    else:
         if user.role != models.UserRole.driver:
             raise HTTPException(status_code=403, detail="Role is not permitted to view trip stops")
         _get_own_trip(trip_id, user, db)
@@ -410,4 +446,10 @@ def end_trip(
     )
     db.commit()
     db.refresh(trip)
+    log_activity(
+        db, driver, "trip.completed", "trip", trip.id,
+        organization_id=trip.route.organization_id,
+        details={"route_id": trip.route_id},
+    )
+    db.commit()
     return trip

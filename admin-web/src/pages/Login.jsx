@@ -10,6 +10,11 @@ export default function Login({ onLoggedIn }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const passengerAppUrl = new URL(
+    import.meta.env.VITE_PASSENGER_APP_URL || "http://localhost:5174/",
+    window.location.href,
+  );
+  passengerAppUrl.searchParams.set("mode", "register");
 
   useEffect(() => {
     let cancelled = false;
@@ -37,7 +42,7 @@ export default function Login({ onLoggedIn }) {
     setBusy(true);
     try {
       if (mode === "register") {
-        await api.post("/auth/register", { name, email, password, role: "admin" });
+        await api.post("/auth/register", { name, email, password, role: "super_admin" });
         setMode("login");
         setNeedsFirstAdmin(false);
       }
@@ -82,7 +87,7 @@ export default function Login({ onLoggedIn }) {
         <p className="sub">
           {mode === "login"
             ? "Welcome back. Sign in to manage your fleet."
-            : "Create the first administrator account to get started."}
+            : "Create the first super administrator account to get started."}
         </p>
         {needsFirstAdmin && (
           <div className="tabs auth-tabs">
@@ -98,7 +103,7 @@ export default function Login({ onLoggedIn }) {
               className={`tab ${mode === "register" ? "active" : ""}`}
               onClick={() => { setError(""); setMode("register"); }}
             >
-              Sign up
+              Create initial admin
             </button>
           </div>
         )}
@@ -131,10 +136,13 @@ export default function Login({ onLoggedIn }) {
         {checkingBootstrap ? (
           <p className="hint-text" role="status">Checking administrator setup...</p>
         ) : needsFirstAdmin ? (
-          <p className="hint-text">First time here? Create the initial admin account to set up your portal.</p>
+          <p className="hint-text">First time here? Create the initial super administrator account to set up your portal.</p>
         ) : (
           <p className="hint-text">Admin accounts are created by an existing administrator.</p>
         )}
+        <p className="auth-switch">
+          Don&apos;t have an account? <a href={passengerAppUrl.toString()}>Sign up</a>
+        </p>
       </div>
     </div>
   );

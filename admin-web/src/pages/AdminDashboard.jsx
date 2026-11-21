@@ -4,7 +4,7 @@ import StatusPill from "../components/StatusPill.jsx";
 import MapView from "../components/MapView.jsx";
 import LocationLabel from "../components/LocationLabel.jsx";
 
-const TABS = ["Overview", "Vehicles", "Drivers", "Routes", "Trips", "History", "Reports", "Users", "Organizations", "Alerts"];
+const TABS = ["Overview", "Vehicles", "Drivers", "Routes", "Trips", "Demo Control Center", "History", "Reports", "Users", "Organizations", "Alerts", "Audit"];
 
 const ICON_SHAPES = {
   vehicle: (
@@ -63,6 +63,10 @@ function SectionTitle({ icon, children }) {
 }
 
 export default function AdminDashboard({ user }) {
+  const platformAdmin = ["admin", "super_admin"].includes(user.role);
+  const visibleTabs = platformAdmin
+    ? TABS
+    : TABS.filter((tabName) => tabName !== "Organizations");
   const [tab, setTab] = useState("Overview");
   const [vehicles, setVehicles] = useState([]);
   const [drivers, setDrivers] = useState([]);
@@ -152,14 +156,14 @@ export default function AdminDashboard({ user }) {
   </svg>
 </div>
       <div className="tabs">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <div key={t} className={`tab ${tab === t ? "active" : ""}`} onClick={() => setTab(t)}>
             {t}
           </div>
         ))}
       </div>
 
-      <div className="inline-form" style={{ marginBottom: 16 }}>
+      {platformAdmin && <div className="inline-form" style={{ marginBottom: 16 }}>
         <label htmlFor="organization-filter">Organization</label>
         <select
           id="organization-filter"
@@ -172,7 +176,7 @@ export default function AdminDashboard({ user }) {
           ))}
           <option value="unassigned">Unassigned</option>
         </select>
-      </div>
+      </div>}
 
       {error && <div className="error-text" role="alert">{error}</div>}
 
@@ -214,6 +218,7 @@ export default function AdminDashboard({ user }) {
         />
       )}
       {tab === "Trips" && <TripsTab trips={filteredTrips} routes={filteredRoutes} drivers={drivers} onChange={refreshAll} setError={setError} />}
+      {tab === "Demo Control Center" && <DemoControlCenter />}
       {tab === "History" && <HistoryTab trips={filteredTrips} routes={filteredRoutes} drivers={drivers} setError={setError} />}
       {tab === "Reports" && (
         <ReportsTab
@@ -225,12 +230,92 @@ export default function AdminDashboard({ user }) {
         />
       )}
       {tab === "Users" && <UsersTab users={users} organizations={organizations} currentUser={user} onChange={refreshAll} setError={setError} />}
-      {tab === "Organizations" && <OrganizationsTab organizations={organizations} onChange={refreshAll} setError={setError} />}
+      {platformAdmin && tab === "Organizations" && <OrganizationsTab organizations={organizations} onChange={refreshAll} setError={setError} />}
       {tab === "Alerts" && <AlertsTab alerts={alerts} onChange={refreshAll} setError={setError} />}
+      {tab === "Audit" && <AuditTab users={users} setError={setError} />}
       </>
       )}
     </div>
   );
+}
+
+function DemoControlCenter() {
+  const [status, setStatus] = useState(null);
+  const [comparison, setComparison] = useState(null);
+  const [clusters, setClusters] = useState(null);
+  const [schedule, setSchedule] = useState(null);
+  const [mapData, setMapData] = useState({ routes: [] });
+  const [eta, setEta] = useState(null);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [gps, setGps] = useState([]);
+  async function refresh() {
+    try {
+      const nextStatus = await api.get("/demo/status"); setStatus(nextStatus);
+      if (nextStatus.enabled) {
+        const [map, etaResult] = await Promise.all([api.get("/demo/map"), api.get("/demo/eta")]);
+        setMapData(map); setEta(etaResult);
+      }
+    } catch (error) { setMessage(error.message); }
+  }
+  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    if (status?.simulation !== "running") return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const result = await api.post("/demo/simulation/tick");
+        setGps(result.vehicles || []);
+        await refresh();
+      } catch (error) { setMessage(error.message); }
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [status?.simulation]);
+  async function run(path, label, setter) {
+    setBusy(true); setMessage("");
+    try {
+      const result = await api.post(path);
+      setter?.(result);
+      await refresh();
+      setMessage(result.message || `${label} completed.`);
+    } catch (error) { setMessage(error.message); }
+    finally { setBusy(false); }
+  }
+  const manager = ["fleet_manager", "organization_admin"].includes(api.currentUser()?.role);
+  const markers = gps.filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng)).map((p) => ({...p, label: `Simulated vehicle ${p.trip_id}`}));
+  return <section className="card demo-center">
+    <SectionTitle icon="route">Demo Control Center</SectionTitle>
+    <p>Explicit demo environment · simulated GPS · operational records remain in their organization.</p>
+    {message && <p role="status" className="demo-message">{message}</p>}
+    {!status?.enabled ? <>
+      <p>The Lahore demo fleet is not initialized yet.</p>
+      {!manager && <button disabled={busy} onClick={() => run("/demo/initialize", "Initialization", setStatus)}>Initialize Lahore demo dataset</button>}
+      {manager && <p>A platform administrator must initialize the demo fleet once. Then sign in as the demo Fleet Manager.</p>}
+    </> : <>
+      <div className="hero-chips"><span className="hero-chip">{status.students} students</span><span className="hero-chip">{status.vehicles} vehicles</span><span className="hero-chip">{status.routes} routes</span><span className="hero-chip">{status.simulation} GPS</span></div>
+      <p>Trips: {status.trip_statuses?.scheduled || 0} scheduled, {status.trip_statuses?.active || 0} active, {status.trip_statuses?.completed || 0} completed · {status.notifications || 0} demo notifications · {status.open_alerts || 0} open demo alerts</p>
+      <div className="demo-controls">
+        <button disabled={busy} onClick={() => run("/demo/initialize", "Initialization", setStatus)}>Initialize / verify dataset</button>
+        {(["start", "pause", "resume", "stop"]).map((action) => <button key={action} disabled={busy} onClick={() => run(`/demo/simulation/control/${action}`, "Simulation", setStatus)}>{action[0].toUpperCase()+action.slice(1)} GPS</button>)}
+        <button disabled={busy} onClick={() => run("/demo/cluster", "Clustering", setClusters)}>Run passenger clustering</button>
+        <button disabled={busy} onClick={() => run("/demo/compare", "Route comparison", setComparison)}>Compare / optimize routes</button>
+        <button disabled={busy} onClick={() => run("/demo/schedule", "Scheduling", setSchedule)}>Run smart scheduling</button>
+        {(["low", "moderate", "heavy"]).map((traffic) => <button key={traffic} disabled={busy} onClick={() => run(`/demo/traffic/${traffic}`, "Traffic scenario")}>{traffic} traffic</button>)}
+        <button disabled={busy} className="danger-button" onClick={() => window.confirm("Reset only the GoVan Lahore Demo Fleet organization and its records?") && run("/demo/reset", "Demo reset", setStatus)}>Reset demo data</button>
+      </div>
+      <MapView height={400} markers={[...mapData.routes.flatMap((route) => route.markers), ...markers]}
+        paths={mapData.routes.map((route) => ({id: route.id, positions: route.geometry, label: `${route.name} · ${route.routing_source}`, color: ["#087e8b", "#ff5a5f", "#5c4d7d"][route.id % 3]}))} />
+      {eta?.estimates?.map((item) => <p key={item.trip_id}>Trip {item.trip_id}: {item.eta_minutes} min ETA · {item.distance_km} km remaining · {item.traffic_scenario} traffic · {item.routing_source}</p>)}
+      {comparison && <div><h3>Computed route comparison</h3><div className="table-wrap"><table><thead><tr><th>Measure</th><th>Original</th><th>Optimized</th></tr></thead><tbody>
+        <tr><td>Total distance</td><td>{comparison.original.distance_km} km</td><td>{comparison.optimized.distance_km} km</td></tr>
+        <tr><td>Estimated duration</td><td>{comparison.original.duration_min} min</td><td>{comparison.optimized.duration_min} min</td></tr>
+        <tr><td>Vehicles utilized</td><td>{comparison.original.vehicles}</td><td>{comparison.optimized.vehicles}</td></tr>
+        <tr><td>Students assigned</td><td>{comparison.original.students}</td><td>{comparison.optimized.students}</td></tr>
+        <tr><td>Savings</td><td colSpan="2">{comparison.distance_saved_km} km · {comparison.time_saved_min} min</td></tr>
+      </tbody></table></div><h4>Vehicle capacities and optimized stop order</h4>{comparison.assignments.map((a) => <p key={a.route}>{a.route}: {a.students}/{a.capacity} students · {a.utilization_pct}% utilized · {a.routing_source} · {a.optimized_stop_order.join(" → ")}</p>)}{comparison.constraints_violations.map((v) => <p key={v} role="alert">{v}</p>)}</div>}
+      {clusters && <div><h3>K-means passenger clusters</h3>{clusters.groups.map((g) => <p key={g.cluster}>Cluster {g.cluster}: {g.passengers.length} students ({g.passengers.slice(0, 4).join(", ")}{g.passengers.length > 4 ? "…" : ""})</p>)}</div>}
+      {schedule && <div><h3>Scheduling results</h3>{schedule.scheduled_routes.map((r) => <p key={r.route}>{r.route}: {r.pickup_time}, {r.driver}, {r.vehicle}; capacity {r.capacity_ok ? "OK" : "exceeded"}; conflict {r.conflict ? "yes" : "no"}</p>)}</div>}
+    </>}
+  </section>;
 }
 
 function ReportsTab({ routes, vehicles, drivers, organizationFilter, setError }) {
@@ -1031,6 +1116,10 @@ function DriversTab({ drivers, vehicles, trips, onChange, setError }) {
 }
 
 function UsersTab({ users, organizations, currentUser, onChange, setError }) {
+  const platformAdmin = ["admin", "super_admin"].includes(currentUser.role);
+  const roleOptions = platformAdmin
+    ? [["super_admin", "Super Admin"], ["organization_admin", "Organization Admin"], ["fleet_manager", "Fleet Manager"], ["driver", "Driver"], ["passenger", "Passenger"], ["guardian", "Guardian"], ["admin", "Legacy Admin"]]
+    : [["driver", "Driver"], ["passenger", "Passenger"], ["guardian", "Guardian"]];
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -1162,18 +1251,20 @@ function UsersTab({ users, organizations, currentUser, onChange, setError }) {
         <input placeholder="Full name" value={name} onChange={(event) => setName(event.target.value)} required />
         <input type="email" placeholder="Email" value={email} onChange={(event) => setEmail(event.target.value)} required />
         <input type="password" placeholder="Password" value={password} onChange={(event) => setPassword(event.target.value)} required />
-        <select value={role} onChange={(event) => setRole(event.target.value)}>
-          <option value="admin">Admin</option>
-          <option value="driver">Driver</option>
-          <option value="passenger">Passenger</option>
-          <option value="guardian">Guardian</option>
+        <select value={role} onChange={(event) => {
+          setRole(event.target.value);
+          if (["super_admin", "admin"].includes(event.target.value)) setOrganizationId("");
+        }}>
+          {roleOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select>
-        <select value={organizationId} onChange={(event) => setOrganizationId(event.target.value)}>
-          <option value="">No organization</option>
-          {organizations.map((organization) => (
-            <option key={organization.id} value={organization.id}>{organization.name}</option>
-          ))}
-        </select>
+        {platformAdmin && !["super_admin", "admin"].includes(role) && (
+          <select value={organizationId} onChange={(event) => setOrganizationId(event.target.value)} required>
+            <option value="">Select organization</option>
+            {organizations.filter((organization) => organization.is_active).map((organization) => (
+              <option key={organization.id} value={organization.id}>{organization.name}</option>
+            ))}
+          </select>
+        )}
         <button type="submit" disabled={busy}>{busy ? "Creating..." : "Create user"}</button>
       </form>
 
@@ -1212,13 +1303,11 @@ function UsersTab({ users, organizations, currentUser, onChange, setError }) {
                       disabled={isSelf}
                       onChange={(event) => updateEdit(userItem.id, "role", event.target.value)}
                     >
-                      <option value="admin">Admin</option>
-                      <option value="driver">Driver</option>
-                      <option value="passenger">Passenger</option>
-                      <option value="guardian">Guardian</option>
+                      {roleOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                     </select>
                   </td>
                   <td>
+                    {platformAdmin ? (
                     <select
                       value={edit.organization_id}
                       onChange={(event) => updateEdit(userItem.id, "organization_id", event.target.value)}
@@ -1228,6 +1317,7 @@ function UsersTab({ users, organizations, currentUser, onChange, setError }) {
                         <option key={organization.id} value={organization.id}>{organization.name}</option>
                       ))}
                     </select>
+                    ) : organizations.find((organization) => organization.id === userItem.organization_id)?.name || "—"}
                   </td>
                   <td>{formatDateTime(userItem.created_at)}</td>
                   <td>
@@ -1390,6 +1480,16 @@ function OrganizationsTab({ organizations, onChange, setError }) {
     }
   }
 
+  async function toggleOrganization(organization) {
+    setError("");
+    try {
+      await api.updateOrganization(organization.id, { is_active: !organization.is_active });
+      await onChange();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   return (
     <div className="card">
       <div className="section-header">
@@ -1417,6 +1517,7 @@ function OrganizationsTab({ organizations, onChange, setError }) {
               <th>Name</th>
               <th>Type</th>
               <th>Contact email</th>
+              <th>Status</th>
               <th>Created</th>
               <th></th>
             </tr>
@@ -1447,6 +1548,7 @@ function OrganizationsTab({ organizations, onChange, setError }) {
                     )
                     : organization.contact_email || "—"}
                 </td>
+                <td><StatusPill status={organization.is_active ? "active" : "inactive"} /></td>
                 <td>{formatDateTime(organization.created_at)}</td>
                 <td>
                   {editingId === organization.id ? (
@@ -1457,6 +1559,9 @@ function OrganizationsTab({ organizations, onChange, setError }) {
                   ) : (
                     <>
                       <button className="secondary" onClick={() => startEdit(organization)}>Edit</button>{" "}
+                      <button className="secondary" onClick={() => toggleOrganization(organization)}>
+                        {organization.is_active ? "Suspend" : "Reactivate"}
+                      </button>{" "}
                       <button className="secondary" onClick={() => removeOrganization(organization.id)}>Delete</button>
                     </>
                   )}
@@ -1816,6 +1921,25 @@ function TripsTab({ trips, routes, drivers, onChange, setError }) {
                 label: `${routes.find((r) => r.id === t.route_id)?.name || "Route"} — ${
                   drivers.find((d) => d.id === t.driver_id)?.name || "Driver"
                 }`,
+              }))
+              .concat(trips
+                .filter((t) => t.status === "active")
+                .flatMap((t) => {
+                  const route = routes.find((r) => r.id === t.route_id);
+                  return (route?.stops || []).map((stop) => ({
+                    lat: stop.lat,
+                    lng: stop.lng,
+                    label: `${route.name} — ${stop.sequence + 1}. ${stop.name}`,
+                  }));
+                }))}
+            paths={trips
+              .filter((t) => t.status === "active")
+              .map((t) => routes.find((r) => r.id === t.route_id))
+              .filter((route) => route?.geometry?.length > 1)
+              .map((route) => ({
+                id: `route-${route.id}`,
+                positions: route.geometry,
+                label: `${route.name} (${route.routing_source === "osrm" ? "road route" : "straight-line estimate"})`,
               }))}
             height={320}
           />
@@ -2093,6 +2217,44 @@ function formatDwell(seconds) {
   const minutes = Math.floor(seconds / 60);
   const remainingSeconds = seconds % 60;
   return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
+function AuditTab({ users, setError }) {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.get("/audit-logs/")
+      .then((result) => { if (!cancelled) setEntries(result); })
+      .catch((err) => { if (!cancelled) setError(err.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [setError]);
+
+  return (
+    <div className="card">
+      <div className="section-header"><SectionTitle icon="clock">Activity log</SectionTitle></div>
+      {loading ? <p className="hint-text">Loading activity...</p> : entries.length === 0 ? (
+        <div className="empty-state">No administrative activity has been recorded yet.</div>
+      ) : (
+        <table>
+          <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Record</th><th>Details</th></tr></thead>
+          <tbody>
+            {entries.map((entry) => (
+              <tr key={entry.id}>
+                <td>{formatDateTime(entry.created_at)}</td>
+                <td>{users.find((item) => item.id === entry.actor_id)?.name || `User ${entry.actor_id ?? "removed"}`}</td>
+                <td>{entry.action}</td>
+                <td>{entry.entity_type} {entry.entity_id ?? ""}</td>
+                <td>{Object.entries(entry.details || {}).map(([key, value]) => `${key}: ${value}`).join(" · ") || "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
 }
 
 function AlertsTab({ alerts, onChange, setError }) {

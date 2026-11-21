@@ -1,9 +1,7 @@
 import hashlib
 import logging
-import os
 import secrets
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
@@ -24,37 +22,31 @@ def _password_reset_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _password_reset_url(token: str) -> str:
-    configured_url = os.getenv("GOVAN_PASSWORD_RESET_URL", "http://localhost:5174/")
-    parts = urlsplit(configured_url)
-    query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query["reset_token"] = token
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
-
-
 @router.get("/bootstrap-status")
 def bootstrap_status(db: Session = Depends(get_db)):
     needs_first_admin = not db.query(models.User.id).filter(
-        models.User.role == models.UserRole.admin
+        models.User.role.in_([models.UserRole.admin, models.UserRole.super_admin])
     ).first()
     return {"needs_first_admin": needs_first_admin}
 
 
 @router.post("/register", response_model=schemas.UserOut, status_code=201)
 def register(payload: schemas.UserCreate, db: Session = Depends(get_db)):
-    if payload.role == "admin" and db.get_bind().dialect.name == "sqlite":
+    requested_platform_admin = payload.role in {"admin", "super_admin"}
+    if requested_platform_admin and db.get_bind().dialect.name == "sqlite":
         db.execute(text("BEGIN IMMEDIATE"))
 
-    if payload.organization_id is not None and db.get(
-        models.Organization, payload.organization_id
-    ) is None:
-        raise HTTPException(status_code=404, detail="Organization not found")
+    if payload.organization_id is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Organization assignment must be performed by an administrator",
+        )
 
     existing = db.query(models.User).filter(models.User.email == payload.email).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    if payload.role == "admin" and db.query(models.User.id).filter(
-        models.User.role == models.UserRole.admin
+    if requested_platform_admin and db.query(models.User.id).filter(
+        models.User.role.in_([models.UserRole.admin, models.UserRole.super_admin])
     ).first():
         raise HTTPException(status_code=403, detail="The first administrator has already been created")
     user = models.User(
@@ -78,6 +70,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         raise HTTPException(status_code=401, detail="Incorrect email or password")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="This account is inactive")
+    if user.organization_id is not None:
+        organization = db.get(models.Organization, user.organization_id)
+        if organization is None or not organization.is_active:
+            raise HTTPException(status_code=403, detail="This organization is suspended")
     token = create_access_token(subject=str(user.id), role=user.role.value)
     return schemas.Token(access_token=token, user=user)
 
@@ -104,7 +100,9 @@ def forgot_password(payload: schemas.ForgotPasswordRequest, db: Session = Depend
             expires_at=now + timedelta(minutes=PASSWORD_RESET_EXPIRE_MINUTES),
         ))
         db.commit()
-        logger.info("Password reset link generated: %s", _password_reset_url(reset_token))
+        # Reset credentials must never be written to application logs. A
+        # configured mail provider should deliver this URL to the account owner.
+        logger.info("Password reset requested for an active account")
 
     return {"message": "If an active account exists for that email, a password reset link has been generated."}
 

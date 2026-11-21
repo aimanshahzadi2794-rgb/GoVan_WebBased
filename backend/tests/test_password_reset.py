@@ -1,7 +1,13 @@
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, urlsplit
+import pytest
 
 from .conftest import TestingSessionLocal, models, register_and_login
+
+
+@pytest.fixture(autouse=True)
+def deterministic_reset_token(monkeypatch):
+    tokens = iter(("unit-test-reset-token-0", "unit-test-reset-token-1"))
+    monkeypatch.setattr("app.routers.auth.secrets.token_urlsafe", lambda _size: next(tokens))
 
 
 def _request_reset(client, email, caplog):
@@ -11,23 +17,15 @@ def _request_reset(client, email, caplog):
     return response
 
 
-def _token_from_log(caplog):
-    log_line = next(
-        record.getMessage()
-        for record in caplog.records
-        if "Password reset link generated:" in record.getMessage()
-    )
-    return parse_qs(urlsplit(log_line.split(": ", 1)[1]).query)["reset_token"][0]
+def _token_from_log(caplog, index=0):
+    return f"unit-test-reset-token-{index}"
 
 
-def test_password_reset_link_is_logged_and_token_is_one_time(client, caplog):
+def test_password_reset_token_is_not_logged_and_is_one_time(client, caplog):
     register_and_login(client, "reset-user@example.com", password="OriginalPass1")
     response = _request_reset(client, "reset-user@example.com", caplog)
     token = _token_from_log(caplog)
-    assert "reset_token=" in next(
-        record.getMessage() for record in caplog.records
-        if "Password reset link generated:" in record.getMessage()
-    )
+    assert not any("unit-test-reset-token" in record.getMessage() for record in caplog.records)
 
     reset = client.post(
         "/auth/reset-password",
@@ -55,7 +53,7 @@ def test_password_reset_has_generic_response_for_unknown_email(client, caplog):
         "message": "If an active account exists for that email, a password reset link has been generated."
     }
     assert not any(
-        "Password reset link generated:" in record.getMessage()
+        "unit-test-reset-token" in record.getMessage()
         for record in caplog.records
     )
 
@@ -90,7 +88,7 @@ def test_password_reset_invalidates_older_links(client, caplog):
     first_token = _token_from_log(caplog)
     caplog.clear()
     _request_reset(client, "new-reset-user@example.com", caplog)
-    second_token = _token_from_log(caplog)
+    second_token = _token_from_log(caplog, index=1)
 
     old_link = client.post(
         "/auth/reset-password",

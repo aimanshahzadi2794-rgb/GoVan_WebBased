@@ -18,7 +18,10 @@ def list_guardian_passengers(
     links = (
         db.query(models.GuardianLink, models.User)
         .join(models.User, models.User.id == models.GuardianLink.passenger_id)
-        .filter(models.GuardianLink.guardian_id == guardian.id)
+        .filter(
+            models.GuardianLink.guardian_id == guardian.id,
+            models.User.organization_id == guardian.organization_id,
+        )
         .order_by(models.User.name, models.User.id)
         .all()
     )

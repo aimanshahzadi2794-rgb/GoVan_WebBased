@@ -5,7 +5,12 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..database import get_db
-from ..deps import require_role
+from ..deps import (
+    log_activity,
+    require_organization_manager,
+    require_platform_admin,
+    scope_organization_query,
+)
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
 
@@ -13,16 +18,17 @@ router = APIRouter(prefix="/organizations", tags=["organizations"])
 @router.get("/", response_model=List[schemas.OrganizationOut])
 def list_organizations(
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    user: models.User = Depends(require_organization_manager()),
 ):
-    return db.query(models.Organization).order_by(models.Organization.name).all()
+    query = scope_organization_query(db.query(models.Organization), models.Organization, user)
+    return query.order_by(models.Organization.name).all()
 
 
 @router.post("/", response_model=schemas.OrganizationOut, status_code=201)
 def create_organization(
     payload: schemas.OrganizationCreate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_platform_admin()),
 ):
     name = payload.name.strip()
     if not name:
@@ -35,6 +41,11 @@ def create_organization(
     db.add(organization)
     db.commit()
     db.refresh(organization)
+    log_activity(
+        db, admin, "organization.created", "organization", organization.id,
+        organization_id=organization.id, details={"name": organization.name},
+    )
+    db.commit()
     return organization
 
 
@@ -43,7 +54,7 @@ def update_organization(
     organization_id: int,
     payload: schemas.OrganizationUpdate,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_platform_admin()),
 ):
     organization = db.get(models.Organization, organization_id)
     if not organization:
@@ -57,6 +68,13 @@ def update_organization(
         setattr(organization, field, value)
     db.commit()
     db.refresh(organization)
+    log_activity(
+        db, admin,
+        "organization.suspended" if updates.get("is_active") is False else "organization.updated",
+        "organization", organization.id, organization_id=organization.id,
+        details={"changed_fields": sorted(updates)},
+    )
+    db.commit()
     return organization
 
 
@@ -64,12 +82,16 @@ def update_organization(
 def delete_organization(
     organization_id: int,
     db: Session = Depends(get_db),
-    admin: models.User = Depends(require_role("admin")),
+    admin: models.User = Depends(require_platform_admin()),
 ):
     organization = db.get(models.Organization, organization_id)
     if not organization:
         raise HTTPException(status_code=404, detail="Organization not found")
 
+    log_activity(
+        db, admin, "organization.deleted", "organization", organization.id,
+        organization_id=organization.id, details={"name": organization.name},
+    )
     db.query(models.User).filter(
         models.User.organization_id == organization.id
     ).update({models.User.organization_id: None}, synchronize_session=False)

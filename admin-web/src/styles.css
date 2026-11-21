@@ -297,6 +297,8 @@ input:focus, select:focus {
   margin: 8px 0;
 }
 .hint-text { color: var(--text-muted); font-size: 12.5px; margin-top: 16px; line-height: 1.5; text-align: center; }
+.auth-switch { color: var(--text-muted); font-size: 13px; margin: 14px 0 0; text-align: center; }
+.auth-switch a { color: var(--brand-blue); font-weight: 700; text-decoration: underline; text-underline-offset: 2px; }
 
 /* ---------------- Tabs ---------------- */
 
@@ -499,6 +501,11 @@ body {
 /* ---------------- Stat cards with icons ---------------- */
 
 .stat-card { display: flex; align-items: center; gap: 14px; }
+.demo-center { margin-top: 18px; }
+.demo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.demo-controls button { padding: 9px 12px; }
+.demo-message { padding: 10px 12px; border-radius: 8px; background: var(--success-soft); }
+.demo-controls .danger-button { background: var(--danger); }
 .stat-icon {
   width: 46px;
   height: 46px;

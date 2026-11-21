@@ -280,6 +280,16 @@ input:focus, select:focus {
   margin: 8px 0;
 }
 .hint-text { color: var(--text-muted); font-size: 12.5px; margin-top: 16px; line-height: 1.5; text-align: center; }
+.auth-switch { color: var(--text-muted); font-size: 13px; margin: 16px 0 0; text-align: center; }
+.auth-switch button {
+  padding: 0;
+  color: var(--brand-blue);
+  background: transparent;
+  box-shadow: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.auth-switch button:hover { transform: none; box-shadow: none; color: var(--accent-dark); }
 
 
 .tabs { display: flex; gap: 4px; margin-bottom: 22px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }

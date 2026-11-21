@@ -8,13 +8,24 @@ later hardening, not MVP scope (see NFR-SEC in the SRS for the full
 target).
 """
 import os
+import secrets
+import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 
-SECRET_KEY = os.getenv("GOVAN_SECRET_KEY", "dev-secret-change-me-in-production")
+_configured_secret = os.getenv("GOVAN_SECRET_KEY")
+if not _configured_secret and os.getenv("GOVAN_ENV", "development").lower() == "production":
+    raise RuntimeError("GOVAN_SECRET_KEY must be configured when GOVAN_ENV=production")
+if not _configured_secret:
+    warnings.warn(
+        "GOVAN_SECRET_KEY is unset; using an ephemeral development key. Sessions will reset on restart.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+SECRET_KEY = _configured_secret or secrets.token_urlsafe(48)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 8  # 8 hour session, MVP-simple
 

@@ -18,6 +18,11 @@ from .database import Base
 
 
 class UserRole(str, enum.Enum):
+    super_admin = "super_admin"
+    organization_admin = "organization_admin"
+    fleet_manager = "fleet_manager"
+    # Keep `admin` for existing installations and seed accounts. It has the
+    # same platform-wide access as super_admin until those accounts are migrated.
     admin = "admin"
     driver = "driver"
     passenger = "passenger"
@@ -38,6 +43,7 @@ class Organization(Base):
     name = Column(String, nullable=False)
     type = Column(Enum(OrganizationType), nullable=False)
     contact_email = Column(String, nullable=True)
+    is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
     users = relationship("User", back_populates="organization")
@@ -291,6 +297,7 @@ class EmergencyAlert(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     raised_by = relationship("User")
+    trip = relationship("Trip")
 
 
 class Notification(Base):
@@ -325,3 +332,19 @@ class MaintenanceRecord(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     vehicle = relationship("Vehicle", back_populates="maintenance_records")
+
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
+    action = Column(String, nullable=False)
+    entity_type = Column(String, nullable=False)
+    entity_id = Column(Integer, nullable=True)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    actor = relationship("User")
+    organization = relationship("Organization")
